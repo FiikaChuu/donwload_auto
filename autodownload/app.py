@@ -1,4 +1,5 @@
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 import queue
@@ -8,7 +9,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from urllib.parse import urlsplit
 
-from .downloads import Downloader, Cancelled
+from .downloads import Downloader, Cancelled, AccessPaused
 from .models import select_tasks
 from .sheets import SheetSource
 from .storage import report_dir
@@ -39,6 +40,7 @@ class App:
         self.start = tk.StringVar(value="8")
         self.end = tk.StringVar(value="14")
         self.columns = tk.StringVar()
+        self.delay = tk.StringVar(value="5")
         self.destination = tk.StringVar(value=str(Path.home() / "Downloads" / "Afzal"))
         self.status = tk.StringVar(value="Masukkan tautan Sheets, lalu klik Muat tab.")
         self.controls = []
@@ -46,7 +48,7 @@ class App:
         for variable in [self.url, self.client, self.tab, self.start, self.end, self.columns]:
             variable.trace_add("write", self.invalidate)
         root.protocol("WM_DELETE_WINDOW", self.close)
-        root.after(100, self.poll)
+        self.poll_timer = root.after(100, self.poll)
 
     def _build(self):
         style = ttk.Style()
@@ -81,7 +83,8 @@ class App:
             self.controls.append((widget, "normal"))
         ttk.Label(filters, text="PIC: afzal (tetap)").pack(side="left")
         self.entry(form, "Kolom tautan", self.columns, 4)
-        ttk.Label(form, text="Kosong = deteksi Reference + Link Drive. Atau isi B,G. Akses Sheets privat perlu OAuth.", wraplength=850).grid(row=5, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        self.entry(form, "Jeda minimum (detik)", self.delay, 5)
+        ttk.Label(form, text="Jeda 1–300 detik (bawaan 5). Kolom tautan kosong = deteksi Reference + Link Drive; atau isi B,G.", wraplength=850).grid(row=6, column=0, columnspan=3, sticky="w", pady=(5, 0))
         output = ttk.LabelFrame(base, text="2. Lokasi penyimpanan di perangkat ini", padding=12)
         output.pack(fill="x", pady=12)
         output.columnconfigure(0, weight=1)
@@ -235,15 +238,24 @@ class App:
         if not destination:
             messagebox.showerror("Lokasi kosong", "Pilih folder tujuan terlebih dahulu.")
             return
+        try:
+            delay = float(self.delay.get().strip().replace(",", "."))
+            if not math.isfinite(delay) or not 1 <= delay <= 300:
+                raise ValueError()
+        except ValueError:
+            messagebox.showerror("Jeda tidak valid", "Isi jeda antara 1 dan 300 detik. Disarankan mulai dari 5–10 detik.")
+            return
         tasks = tuple(self.tasks)
         title = self.tab.get()
         session = self.source.session if self.source.private else None
 
         def work():
-            downloader = Downloader(destination, self.cancel, self.log, session)
-            report = {"sheet_tab": title, "pic": "afzal", "rows": []}
+            downloader = Downloader(destination, self.cancel, self.log, session, delay_seconds=delay)
+            report = {"sheet_tab": title, "pic": "afzal", "delay_seconds": delay, "rows": []}
             failed = 0
             cancelled = False
+            paused = False
+            self.log(f"Unduhan berurutan, jeda minimum {delay:g} detik. Waktu tunggu server dapat lebih lama.")
             try:
                 for index, task in enumerate(tasks):
                     downloader.check()
@@ -259,6 +271,8 @@ class App:
                             downloader.download(url, task.number)
                         except Cancelled:
                             raise
+                        except AccessPaused:
+                            raise
                         except Exception as error:
                             message = readable_error(error)
                             errors.append(message)
@@ -270,6 +284,14 @@ class App:
             except Cancelled:
                 cancelled = True
                 self.emit("status", "Dibatalkan. File yang sudah selesai tetap tersimpan.")
+            except AccessPaused as error:
+                paused = True
+                reason = readable_error(error)
+                report["stopped_reason"] = reason
+                report["rows"].append({"number": task.number, "sheet_row": task.sheet_row, "status": "dihentikan server", "errors": [reason]})
+                self.emit("row", (index, "Dihentikan: server membatasi/menolak akses"))
+                self.log(reason)
+                self.emit("status", reason)
             finally:
                 downloader.close()
                 report.update(files_saved=downloader.completed, files_skipped=downloader.skipped, cancelled=cancelled)
@@ -277,13 +299,13 @@ class App:
                 output = report_dir() / f"laporan-{timestamp}.json"
                 output.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
                 self.log(f"Laporan: {output}")
-            if not cancelled:
+            if not cancelled and not paused:
                 self.emit("status", f"Proses berakhir: {downloader.completed} file tersimpan, {downloader.skipped} file dilewati, {failed} baris bermasalah. Periksa catatan galeri dan laporan.")
         self.run(work, "Mengunduh… jangan tutup aplikasi sampai proses berakhir.")
 
     def stop(self):
         self.cancel.set()
-        self.status.set("Menunggu proses aktif berhenti… Transfer Drive publik/login dapat memerlukan waktu.")
+        self.status.set("Menunggu proses aktif berhenti… Transfer Drive/browser atau login yang sedang berlangsung dapat memerlukan waktu.")
 
     def poll(self):
         try:
@@ -328,7 +350,7 @@ class App:
                         return
         except queue.Empty:
             pass
-        self.root.after(100, self.poll)
+        self.poll_timer = self.root.after(100, self.poll)
 
     def close(self):
         if self.busy:
@@ -338,6 +360,7 @@ class App:
             return
         if self.source:
             self.source.close()
+        self.root.after_cancel(self.poll_timer)
         self.root.destroy()
 
     def help(self):

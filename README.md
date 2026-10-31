@@ -15,6 +15,7 @@ Aplikasi desktop berbahasa Indonesia untuk mengambil bahan dari Google Sheets kh
 - File dengan nama sama dari sumber berbeda diberi akhiran ID pendek; file lama/hasil edit manual tidak ditimpa.
 - Gambar diperiksa sebelum disimpan; ekstensi disesuaikan dengan format aslinya tanpa mengompres ulang. Berkas rusak yang berlabel gambar ditolak.
 - Catatan unduhan dan laporan tersimpan di data aplikasi, sehingga folder nomor hanya berisi bahan unduhan.
+- Jeda minimum dapat diatur 1–300 detik (bawaan 5 detik), unduhan berurutan, dan pembatasan server ditangani tanpa mengulang tanpa batas.
 
 ## Jalankan di Windows
 
@@ -22,10 +23,14 @@ Aplikasi desktop berbahasa Indonesia untuk mengambil bahan dari Google Sheets kh
 2. Unduh/clone repository ini, lalu buka `setup_windows.bat` sekali. Internet diperlukan untuk dependensi dan Chromium.
 3. Buka `jalankan_windows.bat`.
 4. Tempel tautan Google Sheets. Untuk Sheets publik, cukup izinkan **Anyone with the link → Viewer** jika memang boleh dibagikan. Untuk data privat, gunakan OAuth di bawah tanpa mengubah izin publik.
-5. Klik **Muat tab**, pilih tab, isi nomor awal/akhir, dan pilih folder tujuan.
+5. Klik **Muat tab**, pilih tab, isi nomor awal/akhir, pilih folder tujuan, dan atur **Jeda minimum (detik)**. Mulai dengan 5–10 detik, lalu perbesar bila layanan meminta.
 6. Klik **Pratinjau Afzal**, periksa daftarnya, lalu **Mulai unduh**.
 
 Aplikasi menyimpan ke perangkat tempat aplikasi berjalan. Aplikasi yang berjalan di cloud tidak dapat memilih drive `D:` pada komputer Windows milik pengguna; jalankan lokal untuk itu.
+
+Jeda berlaku antarawal permintaan HTTP/file yang dijalankan aplikasi, termasuk metadata Drive dengan OAuth, antarfile Drive publik, pembukaan galeri, langkah scroll, dan tombol unduh galeri. Transfer dari tombol galeri ditunggu selesai sebelum tombol berikutnya ditekan. Jeda dan waktu tunggu bisa dibatalkan melalui tombol **Batalkan**. Permintaan internal browser (misalnya gambar saat halaman dimuat), pengalihan HTTP, autentikasi, dan pemindaian folder oleh gdown tidak seluruhnya bisa diatur dengan interval ini.
+
+Untuk HTTP langsung dan Drive API, respons `429`/gangguan sementara memakai jeda bertambah dan mengikuti `Retry-After` (angka detik atau tanggal HTTP), maksimal tiga percobaan ulang. Jika tetap dibatasi atau server menolak dengan `403`, batch dihentikan dan penyebabnya dicatat dalam laporan. Buka kembali hanya setelah menunggu/perizinan diperbaiki. Membuka halaman Fotorek yang memberi `403` atau `429` juga menghentikan batch. Pengaturan ini mengurangi frekuensi akses; tidak menjamin lolos deteksi bot dan tidak melewati login, CAPTCHA, atau batas layanan.
 
 Installer mencari versi stabil yang didukung secara eksplisit, membuat lingkungan terpisah seperti `.venv-3.13`, dan launcher memakai lingkungan hasil instalasi tersebut. `.venv` lama dari Python 3.15 dibiarkan, sehingga tidak perlu menghapusnya secara manual. Paket dipasang dari wheel biner; installer tidak mencoba mengompilasi Pillow dan tidak memerlukan Visual C++ Build Tools.
 

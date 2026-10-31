@@ -1,15 +1,17 @@
 """Download adapters. Files are committed atomically after successful transfer."""
 import hashlib
 import mimetypes
+import math
 import os
 from pathlib import Path
 import re
 import tempfile
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from PIL import Image, UnidentifiedImageError
 
 from .storage import Manifest
@@ -39,6 +41,46 @@ class Cancelled(Exception):
     pass
 
 
+class AccessPaused(Exception):
+    """Stop the batch instead of repeatedly accessing a restricted service."""
+
+
+class Pacer:
+    def __init__(self, delay, cancel, log, clock=time.monotonic):
+        self.delay = float(delay)
+        if not math.isfinite(self.delay) or not 0 <= self.delay <= 300:
+            raise ValueError("Jeda harus berupa angka antara 0 dan 300 detik.")
+        self.cancel, self.log, self.clock = cancel, log, clock
+        self.next_at = 0
+
+    def defer(self, seconds):
+        self.next_at = max(self.next_at, self.clock() + seconds)
+
+    def wait(self):
+        if self.cancel.is_set():
+            raise Cancelled()
+        delay = max(0, self.next_at - self.clock())
+        if delay:
+            self.log(f"Jeda {delay:.1f} detik sebelum permintaan berikutnya…")
+            if self.cancel.wait(delay):
+                raise Cancelled()
+        self.next_at = self.clock() + self.delay
+
+
+def retry_after(value):
+    try:
+        seconds = float(value)
+        return max(0, seconds) if math.isfinite(seconds) else 0
+    except (TypeError, ValueError):
+        try:
+            parsed = parsedate_to_datetime(value)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return max(0, (parsed - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+
 def safe_name(value):
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", unquote(value)).strip(" .")[:160]
     if not name or name in {".", ".."}:
@@ -49,21 +91,39 @@ def safe_name(value):
 
 
 class Downloader:
-    def __init__(self, destination, cancel, log, drive_session=None):
+    def __init__(self, destination, cancel, log, drive_session=None, delay_seconds=5):
         self.root = Path(destination).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.cancel = cancel
         self.log = log
         self.drive_session = drive_session
         self.session = requests.Session()
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.pacer = Pacer(delay_seconds, cancel, log)
         self.browser = self.playwright = None
         self.visited = set()
         self.completed = 0
         self.skipped = 0
         self.manifests = {}
+
+    def request(self, url, session=None, **kwargs):
+        session = session or self.session
+        for attempt in range(4):
+            self.pacer.wait()
+            response = session.get(url, **kwargs)
+            status = response.status_code
+            if status == 403:
+                response.close()
+                raise AccessPaused("Server menolak akses (HTTP 403). Proses dihentikan; periksa izin sebelum mencoba lagi.")
+            if status in {429, 500, 502, 503, 504}:
+                pause = max(self.pacer.delay, 5 * 2 ** attempt,
+                            retry_after(response.headers.get("Retry-After")))
+                self.pacer.defer(pause)
+                response.close()
+                if attempt == 3:
+                    raise AccessPaused(f"Server masih membatasi/tidak dapat melayani permintaan (HTTP {status}). Proses dihentikan; tunggu sebelum mencoba lagi.")
+                self.log(f"Server HTTP {status}; menunggu sedikitnya {pause:.1f} detik sebelum mencoba lagi.")
+                continue
+            return response
 
     def manifest(self, folder):
         key = str(Path(folder).resolve())
@@ -147,7 +207,7 @@ class Downloader:
     def direct(self, url, folder, filename=None, session=None, key=None):
         self.check()
         session = session or self.session
-        with session.get(url, stream=True, timeout=(20, 90)) as response:
+        with self.request(url, session=session, stream=True, timeout=(20, 90)) as response:
             response.raise_for_status()
             kind = response.headers.get("Content-Type", "").split(";")[0].lower()
             if kind in {"text/html", "application/xhtml+xml"}:
@@ -210,11 +270,33 @@ class Downloader:
         self.log("Mengunduh Drive publik; tombol Batal berlaku setelah transfer Drive ini selesai.")
         with tempfile.TemporaryDirectory(prefix=".drive-", dir=folder) as temp:
             if "/folders/" in url:
+                self.pacer.wait()
                 output = gdown.download_folder(url=url, output=temp + os.sep, quiet=True,
-                                              remaining_ok=False, verify=True)
+                                              remaining_ok=False, verify=True, skip_download=True)
                 if not output:
                     raise ValueError("Folder Drive kosong atau tidak dapat diakses. Gunakan Login Google jika dibatasi.")
+                for index, item in enumerate(output):
+                    self.check()
+                    relative = Path(item.local_path).relative_to(temp).as_posix()
+                    name = safe_name(Path(item.path).name)
+                    path, digest = self._target(folder, f"drive:{file_id}:{relative}", name)
+                    if self._known(folder, path, digest):
+                        continue
+                    staging = Path(temp) / f"file-{index}" / name
+                    staging.parent.mkdir()
+                    self.pacer.wait()
+                    saved = gdown.download(id=item.id, output=str(staging), quiet=True, verify=True)
+                    self.check()
+                    if not saved:
+                        raise ValueError("File Drive tidak dapat diunduh; periksa izin dan kuota unduhan.")
+                    source = Path(saved)
+                    if not source.resolve().is_relative_to(Path(temp).resolve()):
+                        raise ValueError("Lokasi unduhan Drive tidak valid.")
+                    path, digest = self._target(folder, f"drive:{file_id}:{relative}", source.name)
+                    self._commit(source, path, digest)
+                return
             else:
+                self.pacer.wait()
                 output = gdown.download(id=file_id, output=temp + os.sep, quiet=True, fuzzy=True, verify=True)
                 if not output:
                     raise ValueError("File Drive tidak dapat diunduh; periksa izin Viewer.")
@@ -233,7 +315,7 @@ class Downloader:
         seen.add(file_id)
         session = self.drive_session
         base = "https://www.googleapis.com/drive/v3/files"
-        response = session.get(f"{base}/{file_id}", params={"fields": "id,name,mimeType,shortcutDetails", "supportsAllDrives": "true"}, timeout=60)
+        response = self.request(f"{base}/{file_id}", session=session, params={"fields": "id,name,mimeType,shortcutDetails", "supportsAllDrives": "true"}, timeout=60)
         response.raise_for_status()
         meta = response.json()
         kind = meta["mimeType"]
@@ -247,7 +329,7 @@ class Downloader:
                           "pageSize": 1000, "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
                 if token:
                     params["pageToken"] = token
-                response = session.get(base, params=params, timeout=60)
+                response = self.request(base, session=session, params=params, timeout=60)
                 response.raise_for_status()
                 data = response.json()
                 for child in data.get("files", []):
@@ -292,7 +374,10 @@ class Downloader:
         before = self.completed + self.skipped
         try:
             self.log("Membuka galeri Fotorek di Chromium…")
+            self.pacer.wait()
             response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            if response and response.status in {403, 429}:
+                raise AccessPaused(f"Fotorek membatasi/menolak akses (HTTP {response.status}). Proses dihentikan; tunggu dan periksa akses.")
             if response and response.status >= 400:
                 raise ValueError(f"Fotorek mengembalikan HTTP {response.status}.")
             page.wait_for_timeout(2000)
@@ -304,6 +389,7 @@ class Downloader:
                 if state == previous:
                     break
                 previous = state
+                self.pacer.wait()
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(600)
             links = page.locator("a[download]").evaluate_all("els => els.map(e => e.href).filter(u => /^https?:/.test(u))")
@@ -314,8 +400,12 @@ class Downloader:
                 button = buttons.nth(i)
                 if button.is_visible() and button.is_enabled():
                     try:
-                        with page.expect_download(timeout=10000):
+                        self.pacer.wait()
+                        with page.expect_download(timeout=10000) as pending:
                             button.click(timeout=5000)
+                        # Wait until transfer finishes before clicking another button.
+                        if pending.value.failure():
+                            raise ValueError("Unduhan galeri gagal di browser.")
                     except BrowserTimeout:
                         # A button may reveal download links rather than trigger a file.
                         pass

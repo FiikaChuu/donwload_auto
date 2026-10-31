@@ -16,11 +16,56 @@ from openpyxl import Workbook
 import requests
 
 from autodownload.app import App
+from autodownload.models import Task
 from image_fixture import jpeg_bytes
 
 
 @unittest.skipIf(sys.platform.startswith("linux") and not os.environ.get("DISPLAY"), "Requires graphical display")
 class GuiWorkflowTests(unittest.TestCase):
+    def test_server_denial_stops_remaining_rows_and_reports_pause(self):
+        requests_seen = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                requests_seen.append(self.path)
+                self.send_error(403)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        root = tk.Tk()
+        root.withdraw()
+        app = App(root)
+        from types import SimpleNamespace
+        app.source = SimpleNamespace(private=False, close=lambda: None)
+        try:
+            with tempfile.TemporaryDirectory() as output, tempfile.TemporaryDirectory() as app_data, patch.dict(os.environ, {"AFZAL_DATA_DIR": app_data}), patch("autodownload.app.messagebox.showerror") as error:
+                app.tasks = [Task(9, 10, (f"http://127.0.0.1:{server.server_port}/blocked",)),
+                             Task(10, 11, (f"http://127.0.0.1:{server.server_port}/next",))]
+                for i in range(2):
+                    app.tree.insert("", "end", iid=str(i), values=(9+i, 10+i, 1, "Siap"))
+                app.destination.set(output)
+                app.delay.set("1")
+                app.download()
+                deadline = time.monotonic() + 10
+                while app.busy and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.01)
+                self.assertFalse(app.busy)
+                self.assertEqual(requests_seen, ["/blocked"])
+                self.assertIn("403", app.status.get())
+                report = json.loads(next((Path(app_data) / "reports").glob("*.json")).read_text())
+                self.assertIn("403", report["stopped_reason"])
+                self.assertEqual(report["delay_seconds"], 1)
+                self.assertEqual(report["rows"][0]["status"], "dihentikan server")
+                error.assert_not_called()
+        finally:
+            app.close()
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_load_select_tab_preview_download_and_invalidate(self):
         workbook = Workbook()
         workbook.active.title = "FEEDS-OKT"
@@ -98,9 +143,7 @@ class GuiWorkflowTests(unittest.TestCase):
                 self.assertEqual(str(app.download_button["state"]), "disabled")
                 error.assert_not_called()
         finally:
-            if app.source:
-                app.source.close()
-            root.destroy()
+            app.close()
             server.shutdown()
             server.server_close()
             server_thread.join()

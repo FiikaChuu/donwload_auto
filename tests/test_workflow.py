@@ -137,7 +137,7 @@ class DownloadTests(unittest.TestCase):
         self.environ = patch.dict(os.environ, {"AFZAL_DATA_DIR": self.app_data.name})
         self.environ.start()
         self.cancel = threading.Event()
-        self.downloader = Downloader(self.temp.name, self.cancel, lambda _: None)
+        self.downloader = Downloader(self.temp.name, self.cancel, lambda _: None, delay_seconds=0)
 
     def tearDown(self):
         self.downloader.close()
@@ -162,7 +162,7 @@ class DownloadTests(unittest.TestCase):
         for photo in folder.glob("*.jpg"):
             self.assertEqual(photo.read_bytes(), jpeg_bytes())
         self.downloader.close()
-        self.downloader = Downloader(self.temp.name, self.cancel, lambda _: None)
+        self.downloader = Downloader(self.temp.name, self.cancel, lambda _: None, delay_seconds=0)
         self.downloader.download(self.url + "/a", 9)
         self.assertEqual(self.downloader.skipped, 1)
         self.assertEqual(len(list(folder.glob("*.jpg"))), 2)
@@ -293,7 +293,7 @@ class DownloadTests(unittest.TestCase):
 
     def test_manifest_is_scoped_to_full_destination_path(self):
         self.downloader.download(self.url + "/a", 9)
-        other = Downloader(Path(self.temp.name) / "another-destination", self.cancel, lambda _: None)
+        other = Downloader(Path(self.temp.name) / "another-destination", self.cancel, lambda _: None, delay_seconds=0)
         try:
             other.download(self.url + "/a", 9)
             self.assertEqual(other.completed, 1)

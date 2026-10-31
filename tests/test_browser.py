@@ -61,7 +61,7 @@ class BrowserGalleryTests(unittest.TestCase):
             return original(browser_type, **kwargs)
         with tempfile.TemporaryDirectory() as output, tempfile.TemporaryDirectory() as app_data, patch.dict(os.environ, {"AFZAL_DATA_DIR": app_data}), patch.object(BrowserType, "launch", launch):
             messages = []
-            downloader = Downloader(output, threading.Event(), messages.append)
+            downloader = Downloader(output, threading.Event(), messages.append, delay_seconds=0)
             try:
                 for number, route in enumerate(["button", "link", "media"], 8):
                     folder = downloader.folder(number)
