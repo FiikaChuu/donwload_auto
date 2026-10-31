@@ -18,7 +18,7 @@ Aplikasi desktop berbahasa Indonesia untuk mengambil bahan dari Google Sheets kh
 
 ## Jalankan di Windows
 
-1. Pasang **Python 3.11 atau lebih baru** dari python.org, termasuk Python Launcher dan Tcl/Tk (opsi bawaan installer Windows).
+1. Pasang **Python stabil 3.13 (disarankan), 3.12, atau 3.11** dari python.org, termasuk Python Launcher dan Tcl/Tk (opsi bawaan installer Windows). Python 3.15 belum didukung. Python versi lain boleh tetap terpasang.
 2. Unduh/clone repository ini, lalu buka `setup_windows.bat` sekali. Internet diperlukan untuk dependensi dan Chromium.
 3. Buka `jalankan_windows.bat`.
 4. Tempel tautan Google Sheets. Untuk Sheets publik, cukup izinkan **Anyone with the link → Viewer** jika memang boleh dibagikan. Untuk data privat, gunakan OAuth di bawah tanpa mengubah izin publik.
@@ -26,6 +26,16 @@ Aplikasi desktop berbahasa Indonesia untuk mengambil bahan dari Google Sheets kh
 6. Klik **Pratinjau Afzal**, periksa daftarnya, lalu **Mulai unduh**.
 
 Aplikasi menyimpan ke perangkat tempat aplikasi berjalan. Aplikasi yang berjalan di cloud tidak dapat memilih drive `D:` pada komputer Windows milik pengguna; jalankan lokal untuk itu.
+
+Installer mencari versi stabil yang didukung secara eksplisit, membuat lingkungan terpisah seperti `.venv-3.13`, dan launcher memakai lingkungan hasil instalasi tersebut. `.venv` lama dari Python 3.15 dibiarkan, sehingga tidak perlu menghapusnya secara manual. Paket dipasang dari wheel biner; installer tidak mencoba mengompilasi Pillow dan tidak memerlukan Visual C++ Build Tools.
+
+Jika muncul pesan Pillow tidak mendukung Python 3.15 / gagal membangun wheel, unduh kode terbaru dan pasang Python 3.13 terlebih dahulu. Di PowerShell bisa menggunakan:
+
+```powershell
+winget install -e --id Python.Python.3.13 --source winget
+```
+
+Setelah instalasi Python selesai, tutup jendela installer lama dan jalankan `setup_windows.bat` terbaru. Paket biner juga bergantung pada arsitektur mesin; gunakan installer Python 64-bit yang sesuai perangkat.
 
 ## Sheets / Drive privat: Login Google
 
