@@ -13,6 +13,8 @@ Aplikasi desktop berbahasa Indonesia untuk mengambil bahan dari Google Sheets kh
 - Sumber: file HTTP/HTTPS langsung, file/folder Google Drive, dan galeri Fotorek melalui Chromium.
 - Proses di latar belakang, pembatalan, laporan JSON, pencegahan file parsial, dan pemeriksaan SHA-256 agar file lengkap dapat dilewati saat dijalankan ulang.
 - File dengan nama sama dari sumber berbeda diberi akhiran ID pendek; file lama/hasil edit manual tidak ditimpa.
+- Gambar diperiksa sebelum disimpan; ekstensi disesuaikan dengan format aslinya tanpa mengompres ulang. Berkas rusak yang berlabel gambar ditolak.
+- Catatan unduhan dan laporan tersimpan di data aplikasi, sehingga folder nomor hanya berisi bahan unduhan.
 
 ## Jalankan di Windows
 
@@ -62,8 +64,20 @@ Kolom tautan otomatis: `Reference`, `Referensi`, `Link Drive`, `Drive`, `Link`, 
 - **Status Fotorek:** implementasi ini belum diverifikasi terhadap galeri Fotorek asli karena akses `app.fotorek.id` diblokir jaringan lingkungan pengembangan. Jangan menganggap seluruh file asli pasti terambil sebelum diuji pada galeri pengguna; struktur situs mungkin memerlukan penyesuaian. Pesan “Selesai diproses” tidak menjamin kelengkapan galeri.
 - Chromium membutuhkan desktop grafis. Jika halaman perlu login atau tidak menampilkan media, proses akan melaporkan masalah; tidak mengklaim sukses saat tidak ada file. Kredensial Google tidak digunakan untuk masuk Fotorek.
 - Foto/video yang terhapus, tautan kedaluwarsa, atau izin kurang dilaporkan dalam log. Baris berikutnya tetap diproses.
-- Berkas `.afzal-manifest.json` dalam folder nomor menyimpan nama dan checksum, tanpa tautan/token. Jangan hapus jika ingin deteksi unduhan yang sudah lengkap. Rerun Drive publik masih perlu mengambil data sementara sebelum pemeriksaan duplikat.
-- Laporan `laporan-<waktu>.json` di folder tujuan memuat tab, nomor/baris, jumlah file, dan masalah. Log tidak menyimpan query URL bertoken.
+- Catatan checksum tersimpan di `%LOCALAPPDATA%/AfzalDownloader/manifests/` di Windows (Linux/macOS: `~/.config/AfzalDownloader/manifests/`). Catatan dibedakan per lokasi tujuan dan nomor, tanpa menyimpan tautan/token. Rerun Drive publik masih perlu mengambil data sementara sebelum pemeriksaan duplikat.
+- Laporan `laporan-<waktu>.json` tersimpan di `%LOCALAPPDATA%/AfzalDownloader/reports/`, dengan lokasi lengkap ditampilkan pada log aplikasi. Isinya tab, nomor/baris, jumlah file, dan masalah. Log tidak menyimpan query URL bertoken.
+
+## Memperbarui versi lama dan merapikan manifest
+
+Unduh ZIP GitHub terbaru, ekstrak ke folder aplikasi baru, lalu jalankan `setup_windows.bat` lagi karena versi ini menambahkan Pillow untuk pemeriksaan gambar. Pilih lokasi hasil unduhan lama, misalnya `Downloads/hasil donlod` (folder induk yang berisi `8`, `9`, `11`, dan seterusnya), lalu klik **Rapikan folder lama**.
+
+Tombol ini memindahkan `.afzal-manifest.json` versi lama ke data aplikasi setelah salinannya berhasil disimpan. Foto/video tetap di lokasi semula dan catatan unduhan ulang tetap tersedia. Format catatan yang tidak dikenal tidak dihapus. Saat mengunduh lagi, folder nomor yang dipakai juga otomatis dirapikan. Laporan lama yang sudah terlanjur tersimpan di folder tujuan tidak dihapus otomatis.
+
+## Foto tidak terbuka: “Package could not be registered”
+
+Pesan ini biasanya berasal dari registrasi aplikasi **Microsoft Photos** di Windows, bukan bukti bahwa gambar rusak. Jika Explorer masih menampilkan pratinjau, coba klik kanan gambar → **Open with / Buka dengan → Paint**, atau seret gambarnya ke Chrome/Edge. Jika terbuka, perbaiki Microsoft Photos melalui **Settings → Apps → Installed apps → Microsoft Photos → Advanced options → Repair**.
+
+Versi ini memeriksa isi gambar sebelum menyimpan, menolak gambar yang gagal dibaca, dan membetulkan ekstensi (misalnya file JPEG berlabel PNG menjadi `.jpg`). Gambar tidak dikonversi atau dikompres ulang. Pemeriksaan ini tidak memperbaiki registrasi aplikasi Windows dan tidak mengubah file hasil unduhan lama. Kirim contoh berkas jika gambar juga gagal dibuka di Paint atau browser agar isi file bisa diperiksa.
 
 ## Linux / macOS dan pengembangan
 
@@ -88,4 +102,4 @@ python -m unittest discover -s tests -v
 
 Tes menguji filter PIC dan nomor, beberapa tab dan hyperlink XLSX, pembacaan rich links API, unduhan HTTP nyata pada server lokal, penggabungan folder, unduhan ulang, pembatalan, kesalahan, preservasi file lama, dan pagination Drive melalui respons simulasi. Integrasi Google/Fotorek asli dan UI Windows memerlukan pengujian pada perangkat/akun pengguna.
 
-Validasi pengembangan: **16 tes lulus** di Linux dengan display virtual dan Chromium sistem. Termasuk alur antarmuka muat tab → pratinjau → unduh → laporan, dan galeri simulasi lokal dengan tombol unduh, link download, serta fallback media. Tes GUI dilewati bila Linux tidak memiliki display; tes browser opsional dijalankan jika variabel `AFZAL_TEST_CHROMIUM` berisi path executable Chromium. Tidak ada tes pada Google/Fotorek asli atau Windows yang diklaim telah lulus.
+Tes tambahan mencakup pemindahan manifest lama, preservasi catatan jika penyimpanan gagal, pemisahan cache berdasarkan lokasi tujuan, penolakan gambar palsu/rusak, dan koreksi ekstensi tanpa mengubah byte gambar. Tes GUI dilewati bila Linux tidak memiliki display; tes browser opsional dijalankan jika variabel `AFZAL_TEST_CHROMIUM` berisi path executable Chromium. Tidak ada tes pada Google/Fotorek asli atau Windows yang diklaim telah lulus.

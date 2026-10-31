@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from .downloads import Downloader, Cancelled
 from .models import select_tasks
 from .sheets import SheetSource
+from .storage import report_dir
 
 
 def readable_error(error):
@@ -88,6 +89,7 @@ class App:
         entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.controls.append((entry, "normal"))
         self.button(output, "Pilih folder…", self.choose_folder, row=0, column=1)
+        self.button(output, "Rapikan folder lama", self.tidy, row=0, column=2)
         ttk.Label(output, text="Contoh: D:/Bahan/9/ berisi file untuk No. 9. File lama tidak ditimpa; ZIP disimpan sebagai ZIP.").grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         actions = ttk.Frame(base)
         actions.pack(fill="x", pady=(0, 10))
@@ -143,6 +145,21 @@ class App:
         path = filedialog.askopenfilename(title="Pilih OAuth Client Desktop JSON", filetypes=[("JSON", "*.json")])
         if path:
             self.client.set(path)
+
+    def tidy(self):
+        destination = self.destination.get().strip()
+        if not destination or not Path(destination).is_dir():
+            messagebox.showerror("Pilih folder", "Pilih lokasi hasil unduhan lama terlebih dahulu (folder induk yang berisi folder nomor).")
+            return
+
+        def work():
+            downloader = Downloader(destination, self.cancel, self.log)
+            try:
+                count = downloader.tidy()
+                self.emit("status", f"Selesai: {count} catatan lama dipindahkan ke data aplikasi. Foto/video tetap tersimpan.")
+            finally:
+                downloader.close()
+        self.run(work, "Memindahkan catatan lama ke data aplikasi…")
 
     def emit(self, event, payload):
         self.events.put((event, payload))
@@ -257,9 +274,9 @@ class App:
                 downloader.close()
                 report.update(files_saved=downloader.completed, files_skipped=downloader.skipped, cancelled=cancelled)
                 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-                output = downloader.root / f"laporan-{timestamp}.json"
+                output = report_dir() / f"laporan-{timestamp}.json"
                 output.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-                self.log(f"Laporan: {output.name}")
+                self.log(f"Laporan: {output}")
             if not cancelled:
                 self.emit("status", f"Proses berakhir: {downloader.completed} file tersimpan, {downloader.skipped} file dilewati, {failed} baris bermasalah. Periksa catatan galeri dan laporan.")
         self.run(work, "Mengunduh… jangan tutup aplikasi sampai proses berakhir.")

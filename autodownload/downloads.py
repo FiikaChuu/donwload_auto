@@ -1,6 +1,5 @@
 """Download adapters. Files are committed atomically after successful transfer."""
 import hashlib
-import json
 import mimetypes
 import os
 from pathlib import Path
@@ -11,6 +10,29 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from PIL import Image, UnidentifiedImageError
+
+from .storage import Manifest
+
+IMAGE_EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif",
+                    "BMP": ".bmp", "TIFF": ".tiff", "ICO": ".ico", "AVIF": ".avif"}
+RASTER_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".ico", ".avif"}
+
+
+def image_extension(path, expected_name):
+    try:
+        with Image.open(path) as image:
+            extension = IMAGE_EXTENSIONS.get(image.format)
+            image.verify()
+        with Image.open(path) as image:
+            image.load()
+        return extension
+    except UnidentifiedImageError:
+        if Path(expected_name).suffix.lower() in RASTER_SUFFIXES:
+            raise ValueError("File berlabel gambar tidak berisi gambar yang valid; unduhan tidak disimpan.") from None
+        return None
+    except (OSError, SyntaxError, Image.DecompressionBombError):
+        raise ValueError("Gambar rusak, terpotong, atau terlalu besar untuk diperiksa; unduhan tidak disimpan.") from None
 
 
 class Cancelled(Exception):
@@ -41,6 +63,24 @@ class Downloader:
         self.visited = set()
         self.completed = 0
         self.skipped = 0
+        self.manifests = {}
+
+    def manifest(self, folder):
+        key = str(Path(folder).resolve())
+        if key not in self.manifests:
+            self.manifests[key] = Manifest(folder, self.log)
+        return self.manifests[key]
+
+    def tidy(self):
+        count = 0
+        for folder in self.root.iterdir():
+            self.check()
+            if folder.name.isdigit() and folder.is_dir() and not folder.is_symlink():
+                legacy = folder / ".afzal-manifest.json"
+                existed = legacy.is_file() and not legacy.is_symlink()
+                self.manifest(folder)
+                count += existed and not legacy.exists()
+        return count
 
     def check(self):
         if self.cancel.is_set():
@@ -51,28 +91,27 @@ class Downloader:
         target.mkdir(exist_ok=True)
         if target.resolve().parent != self.root:
             raise ValueError("Folder nomor mengarah ke luar lokasi tujuan.")
+        self.manifest(target)
         return target
 
     def _target(self, folder, key, filename):
         digest = hashlib.sha256(key.encode()).hexdigest()
-        try:
-            recorded = json.loads((folder / ".afzal-manifest.json").read_text(encoding="utf-8")).get(digest, {}).get("name")
-            if recorded and safe_name(recorded) == recorded:
-                return folder / recorded, digest
-        except (FileNotFoundError, ValueError):
-            pass
+        recorded = self.manifest(folder).data.get(digest, {}).get("name")
+        if recorded and safe_name(recorded) == recorded:
+            return folder / recorded, digest
         name = safe_name(filename)
         p = Path(name)
         return folder / f"{p.stem[:130]}_{digest[:12]}{p.suffix[:20]}", digest
 
     def _known(self, folder, path, digest):
-        ledger = folder / ".afzal-manifest.json"
-        try:
-            data = json.loads(ledger.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
-            data = {}
-        entry = data.get(digest, {})
+        entry = self.manifest(folder).data.get(digest, {})
         if path.is_file() and entry.get("name") == path.name and entry.get("sha256") == self._hash(path):
+            try:
+                actual = image_extension(path, path.name)
+                if actual and path.suffix.lower() not in {actual, ".jpeg" if actual == ".jpg" else actual, ".tif" if actual == ".tiff" else actual}:
+                    return False
+            except ValueError:
+                return False
             self.skipped += 1
             self.log(f"Lewati file yang sudah lengkap: {path.name}")
             return True
@@ -85,7 +124,15 @@ class Downloader:
 
     def _commit(self, temporary, path, digest):
         self.check()
-        if path.exists() and not self._known(path.parent, path, digest):
+        actual = image_extension(temporary, path.name)
+        if actual and path.suffix.lower() != actual:
+            old_name = path.name
+            path = path.with_suffix(actual)
+            self.log(f"Ekstensi gambar disesuaikan dengan isi: {old_name} → {path.name}")
+        if path.exists() and self._known(path.parent, path, digest):
+            Path(temporary).unlink(missing_ok=True)
+            return
+        if path.exists():
             # Preserve an unrelated or manually changed file.
             base = path
             index = 2
@@ -93,19 +140,7 @@ class Downloader:
                 path = base.with_name(f"{base.stem} ({index}){base.suffix}")
                 index += 1
         os.replace(temporary, path)
-        ledger = path.parent / ".afzal-manifest.json"
-        try:
-            data = json.loads(ledger.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
-            data = {}
-        data[digest] = {"name": path.name, "sha256": self._hash(path)}
-        fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".manifest-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(temp, ledger)
-        finally:
-            Path(temp).unlink(missing_ok=True)
+        self.manifest(path.parent).record(digest, path.name, self._hash(path))
         self.completed += 1
         self.log(f"Tersimpan: {path.parent.name}/{path.name}")
 

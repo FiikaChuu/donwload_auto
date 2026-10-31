@@ -59,7 +59,7 @@ class BrowserGalleryTests(unittest.TestCase):
         def launch(browser_type, **kwargs):
             kwargs["executable_path"] = os.environ["AFZAL_TEST_CHROMIUM"]
             return original(browser_type, **kwargs)
-        with tempfile.TemporaryDirectory() as output, patch.object(BrowserType, "launch", launch):
+        with tempfile.TemporaryDirectory() as output, tempfile.TemporaryDirectory() as app_data, patch.dict(os.environ, {"AFZAL_DATA_DIR": app_data}), patch.object(BrowserType, "launch", launch):
             messages = []
             downloader = Downloader(output, threading.Event(), messages.append)
             try:

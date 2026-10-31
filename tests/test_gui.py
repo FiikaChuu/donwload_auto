@@ -2,6 +2,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -15,6 +16,7 @@ from openpyxl import Workbook
 import requests
 
 from autodownload.app import App
+from image_fixture import jpeg_bytes
 
 
 @unittest.skipIf(sys.platform.startswith("linux") and not os.environ.get("DISPLAY"), "Requires graphical display")
@@ -29,7 +31,7 @@ class GuiWorkflowTests(unittest.TestCase):
                 pass
 
             def do_GET(self):
-                body = data.getvalue() if self.path == "/sheet" else b"test-photo-bytes"
+                body = data.getvalue() if self.path == "/sheet" else jpeg_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream" if self.path == "/sheet" else "image/jpeg")
                 self.send_header("Content-Length", str(len(body)))
@@ -60,7 +62,7 @@ class GuiWorkflowTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertFalse(app.busy, "Worker did not finish")
         try:
-            with tempfile.TemporaryDirectory() as output, patch.object(requests.Session, "get", routed_get), patch("autodownload.app.messagebox.showerror") as error:
+            with tempfile.TemporaryDirectory() as output, tempfile.TemporaryDirectory() as app_data, patch.dict(os.environ, {"AFZAL_DATA_DIR": app_data}), patch.object(requests.Session, "get", routed_get), patch("autodownload.app.messagebox.showerror") as error:
                 app.url.set("https://docs.google.com/spreadsheets/d/" + "a" * 40 + "/edit")
                 app.load()
                 wait()
@@ -76,10 +78,21 @@ class GuiWorkflowTests(unittest.TestCase):
                 wait()
                 photos = list((Path(output) / "9").glob("*.jpg"))
                 self.assertEqual(len(photos), 1)
-                self.assertEqual(photos[0].read_bytes(), b"test-photo-bytes")
-                self.assertEqual(len(list(Path(output).glob("laporan-*.json"))), 1)
+                self.assertEqual(photos[0].read_bytes(), jpeg_bytes())
+                self.assertEqual(len(list((Path(app_data) / "reports").glob("laporan-*.json"))), 1)
+                self.assertEqual(list(Path(output).glob("laporan-*.json")), [])
+                self.assertEqual(list(Path(output).rglob(".afzal-manifest.json")), [])
                 self.assertFalse((Path(output) / "10").exists())
                 self.assertIn("1 file tersimpan", app.status.get())
+                # Exercise the cleanup action on an old-version record too.
+                manifest = next((Path(app_data) / "manifests").glob("*.json"))
+                legacy = Path(output) / "9" / ".afzal-manifest.json"
+                legacy.write_text(json.dumps(json.loads(manifest.read_text())))
+                app.tidy()
+                wait()
+                self.assertFalse(legacy.exists())
+                self.assertEqual(photos[0].read_bytes(), jpeg_bytes())
+                self.assertIn("1 catatan lama", app.status.get())
                 app.start.set("10")
                 self.assertFalse(app.tasks)
                 self.assertEqual(str(app.download_button["state"]), "disabled")

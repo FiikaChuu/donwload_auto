@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -13,6 +14,7 @@ import requests
 from autodownload.downloads import Downloader, Cancelled, safe_name
 from autodownload.models import Cell, select_tasks, spreadsheet_id
 from autodownload.sheets import SheetSource
+from image_fixture import jpeg_bytes
 
 
 def cells(*values):
@@ -103,11 +105,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/fail":
             self.send_error(404)
             return
-        body = b"<html>Login required</html>" if self.path == "/html" else b"photo-original-bytes" * 1000
+        body = b"<html>Login required</html>" if self.path in {"/html", "/fake-image"} else jpeg_bytes()
+        if self.path == "/corrupt":
+            body = b"\x89PNG\r\n\x1a\ntruncated-image"
         self.send_response(200)
-        self.send_header("Content-Type", "text/html" if self.path == "/html" else "image/jpeg")
+        self.send_header("Content-Type", "text/html" if self.path == "/html" else "image/png" if self.path in {"/wrong-extension", "/fake-image", "/corrupt"} else "image/jpeg")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Disposition", 'attachment; filename="photo.jpg"')
+        filename = "photo.png" if self.path in {"/wrong-extension", "/fake-image", "/corrupt"} else "photo.jpg"
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -128,12 +133,17 @@ class DownloadTests(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.app_data = tempfile.TemporaryDirectory()
+        self.environ = patch.dict(os.environ, {"AFZAL_DATA_DIR": self.app_data.name})
+        self.environ.start()
         self.cancel = threading.Event()
         self.downloader = Downloader(self.temp.name, self.cancel, lambda _: None)
 
     def tearDown(self):
         self.downloader.close()
         self.temp.cleanup()
+        self.environ.stop()
+        self.app_data.cleanup()
 
     def test_filter_to_numbered_folders_real_http_and_repeat(self):
         rows = [cells("No.", "PIC", "Reference"),
@@ -150,7 +160,7 @@ class DownloadTests(unittest.TestCase):
         self.assertFalse((Path(self.temp.name) / "10").exists())
         self.assertFalse((Path(self.temp.name) / "15").exists())
         for photo in folder.glob("*.jpg"):
-            self.assertEqual(photo.read_bytes(), b"photo-original-bytes" * 1000)
+            self.assertEqual(photo.read_bytes(), jpeg_bytes())
         self.downloader.close()
         self.downloader = Downloader(self.temp.name, self.cancel, lambda _: None)
         self.downloader.download(self.url + "/a", 9)
@@ -199,7 +209,7 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(len(list(folder.glob("*.jpg"))), 2)
         self.downloader.direct(self.url + "/a", folder)
         self.assertEqual(len(list(folder.glob("*.jpg"))), 2)
-        ledger = json.loads((folder / ".afzal-manifest.json").read_text())
+        ledger = self.downloader.manifest(folder).data
         saved = folder / next(iter(ledger.values()))["name"]
         saved.write_bytes(b"manual edit")
         self.downloader.direct(self.url + "/a", folder)
@@ -213,6 +223,84 @@ class DownloadTests(unittest.TestCase):
             self.assertNotIn("\\", cleaned)
             self.assertNotIn(":", cleaned)
             self.assertNotIn(cleaned, {"CON", "NUL.txt"})
+
+    def test_image_extension_follows_actual_bytes_without_reencoding(self):
+        folder = self.downloader.folder(9)
+        self.downloader.direct(self.url + "/wrong-extension", folder)
+        images = list(folder.glob("*.jpg"))
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0].read_bytes(), jpeg_bytes())
+        self.assertEqual(list(folder.glob("*.png")), [])
+        self.downloader.direct(self.url + "/wrong-extension", folder)
+        self.assertEqual(len(list(folder.glob("*.jpg"))), 1)
+        self.assertEqual(self.downloader.skipped, 1)
+
+    def test_fake_and_truncated_images_are_not_committed(self):
+        folder = self.downloader.folder(9)
+        for route in ["fake-image", "corrupt"]:
+            with self.assertRaises(ValueError):
+                self.downloader.direct(self.url + "/" + route, folder)
+        self.assertEqual(list(folder.iterdir()), [])
+
+    def test_no_application_metadata_in_download_folder(self):
+        self.downloader.download(self.url + "/a", 9)
+        folder = Path(self.temp.name) / "9"
+        self.assertTrue(all(p.suffix == ".jpg" for p in folder.iterdir()))
+        manifest = self.downloader.manifest(folder).path
+        self.assertTrue(manifest.is_file())
+        self.assertTrue(manifest.is_relative_to(Path(self.app_data.name)))
+        self.assertNotIn(self.url, manifest.read_text())
+
+    def test_legacy_manifest_migration_preserves_deduplication_and_media(self):
+        import hashlib
+        folder = Path(self.temp.name) / "11"
+        folder.mkdir()
+        key = hashlib.sha256((self.url + "/a").encode()).hexdigest()
+        photo = folder / "old-photo.jpg"
+        photo.write_bytes(jpeg_bytes())
+        data = {key: {"name": photo.name, "sha256": hashlib.sha256(photo.read_bytes()).hexdigest()}}
+        old = folder / ".afzal-manifest.json"
+        old.write_text(json.dumps(data))
+        self.assertEqual(self.downloader.tidy(), 1)
+        self.assertFalse(old.exists())
+        self.assertEqual(photo.read_bytes(), jpeg_bytes())
+        self.assertEqual(json.loads(self.downloader.manifest(folder).path.read_text()), data)
+        self.downloader.download(self.url + "/a", 11)
+        self.assertEqual(self.downloader.skipped, 1)
+        self.assertEqual(list(folder.iterdir()), [photo])
+        self.assertEqual(self.downloader.tidy(), 0)
+
+    def test_failed_migration_does_not_remove_legacy_record(self):
+        import hashlib
+        folder = Path(self.temp.name) / "11"
+        folder.mkdir()
+        key = "a" * 64
+        old = folder / ".afzal-manifest.json"
+        original = json.dumps({key: {"name": "photo.jpg", "sha256": hashlib.sha256(jpeg_bytes()).hexdigest()}})
+        old.write_text(original)
+        with patch("autodownload.storage.atomic_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.downloader.tidy()
+        self.assertEqual(old.read_text(), original)
+
+    def test_unknown_legacy_file_is_preserved(self):
+        folder = Path(self.temp.name) / "11"
+        folder.mkdir()
+        old = folder / ".afzal-manifest.json"
+        old.write_text('{"my-data": [1, 2, 3]}')
+        self.assertEqual(self.downloader.tidy(), 0)
+        self.assertEqual(old.read_text(), '{"my-data": [1, 2, 3]}')
+
+    def test_manifest_is_scoped_to_full_destination_path(self):
+        self.downloader.download(self.url + "/a", 9)
+        other = Downloader(Path(self.temp.name) / "another-destination", self.cancel, lambda _: None)
+        try:
+            other.download(self.url + "/a", 9)
+            self.assertEqual(other.completed, 1)
+            self.assertNotEqual(self.downloader.manifest(self.downloader.folder(9)).path,
+                                other.manifest(other.folder(9)).path)
+        finally:
+            other.close()
 
     def test_private_drive_pagination_and_shortcut_cycle(self):
         session = Mock()
